@@ -1,3 +1,6 @@
+# -*- mode: ruby -*-
+# vi: set ft=ruby :
+
 disk_size = 1024
 disk_filename = "workdisk.vdi"
 disk_id_filename = ".disk.id"
