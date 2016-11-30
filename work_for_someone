@@ -1,0 +1,75 @@
+disk_size = 1024
+disk_filename = "workdisk.vdi"
+disk_id_filename = ".disk.id"
+file_root = File.dirname(File.expand_path(__FILE__))
+$disk_id_file = File.join(file_root, disk_id_filename)
+$disk_file = File.join(file_root, disk_filename)
+$disk_size = disk_size.to_s
+
+class VagrantPlugins::ProviderVirtualBox::Action::SetName
+    alias_method :original_call, :call
+    def call(env)
+        ui = env[:ui]
+        controller_name = "SATA Whatever"
+        driver = env[:machine].provider.driver
+        uuid = driver.instance_eval { @uuid }
+        vm_info = driver.execute("showvminfo", uuid)
+        has_controller = vm_info.match("Storage Controller Name.*#{controller_name}")
+        if !File.exist?($disk_file)
+            ui.info "Creating storage file '#{$disk_file}'..."
+            driver.execute(
+                "createmedium", "disk",
+                "--filename", $disk_file,
+                "--format", "VDI",
+                "--size", $disk_size
+            )
+        end
+        if !has_controller
+            ui.info "Creating storage controller '#{controller_name}'..."
+            driver.execute(
+                "storagectl", uuid,
+                "--name", "#{controller_name}",
+                "--add", "sata",
+                "--controller", "IntelAhci",
+                "--portcount", "1",
+                "--hostiocache", "off"
+            )
+        end
+        ui.info "Attaching '#{$disk_file}' to '#{controller_name}'..."
+        driver.execute(
+            "storageattach", uuid,
+            "--storagectl", "#{controller_name}",
+            "--port", "0",
+            "--type", "hdd",
+            "--medium", $disk_file
+        )
+        work_disk_info = driver.execute("showmediuminfo", $disk_file)
+        work_disk_uuid = work_disk_info.match(/^UUID\:\s*([a-z0-9\-]+)/).captures[0]
+        uuid_blocks = work_disk_uuid.split("-")
+        disk_by_id = "ata-VBOX_HARDDISK_VB"
+        disk_by_id += uuid_blocks[0] + "-"
+        disk_by_id += uuid_blocks[-1][10..11]
+        disk_by_id += uuid_blocks[-1][8..9]
+        disk_by_id += uuid_blocks[-1][6..7]
+        disk_by_id += uuid_blocks[-1][4..5]
+        File.open($disk_id_file, "w") {|f| f.write(disk_by_id) }
+        original_call(env)
+    end
+end
+
+Vagrant.configure(2) do |config|
+    config.vm.box = "debian/jessie64"
+    !File.exist?($disk_id_file) ? File.open($disk_id_file, "w") {} : nil
+    config.vm.provision "file", source: $disk_id_file, destination: disk_id_filename
+    config.vm.provision "shell", inline: <<-EOF
+        disk=/dev/disk/by-id/$(<#{disk_id_filename})
+        apt-get install -y gdisk
+        sgdisk -n 0:0:0 -t 0:8300 $disk
+        sleep 1 # TODO: how to make sure partition is done?
+        mkfs.ext4 ${disk}-part1
+        mkdir /work
+        echo "${disk}-part1 /work ext4 defaults 0 0" >> /etc/fstab
+        mount /work
+        chown -R vagrant:vagrant /work
+    EOF
+end
